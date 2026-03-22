@@ -1,30 +1,29 @@
-# Agent: Mood | Role: Intent detection, emotional handling, CBT responses
+# Agent: Mood | Role: Intent detection + two-pass response for all emotional states
 
-"""Mood agent — detects intent and handles emotional/behavioral states."""
+"""Mood agent — detects intent; all responses go through the two-pass system."""
 
 import logging
+import os
 
+import gdocs
 import llm
 import memory
-import gdocs
-from config import INTENT_PATTERNS
+from config import GROQ_MODEL, INTENT_PATTERNS
 
 logger = logging.getLogger(__name__)
 
 
 def detect_intent(message: str) -> str:
-    """Classify message intent.
+    """Classify message intent using pattern matching + LLM fallback.
 
-    First tries pattern matching; falls back to LLM classification if ambiguous.
-    Returns one of the INTENT_PATTERNS keys or 'CASUAL'.
+    Returns one of: UPDATE_DOC, STUCK, LOW_MOOD, NEGATIVE_PUSH,
+    COMPLETION_REPORT, PLAN_SUBMISSION, CASUAL
     """
-    msg_lower = message.lower()
+    msg_lower = message.lower().strip()
 
-    # Check UPDATE_DOC first (exact prefix)
     if msg_lower.startswith("/update"):
         return "UPDATE_DOC"
 
-    # Pattern matching
     matched = []
     for intent, patterns in INTENT_PATTERNS.items():
         if intent == "UPDATE_DOC":
@@ -38,101 +37,126 @@ def detect_intent(message: str) -> str:
         return matched[0]
 
     if len(matched) > 1:
-        # Priority order for ambiguous matches
-        priority = [
-            "NEGATIVE_PUSH", "LOW_MOOD", "STUCK",
-            "COMPLETION_REPORT", "PLAN_SUBMISSION",
-        ]
-        for p in priority:
+        # Explicit priority when multiple patterns fire
+        for p in ["NEGATIVE_PUSH", "LOW_MOOD", "STUCK", "COMPLETION_REPORT", "PLAN_SUBMISSION"]:
             if p in matched:
                 return p
 
-    # LLM fallback for ambiguous or no match
+    # LLM classification for short/ambiguous messages that pattern-match nothing
     if not matched:
         try:
-            intent = _llm_classify_intent(message)
-            if intent:
-                return intent
+            return _llm_classify(message)
         except Exception as e:
             logger.warning("LLM intent classification failed: %s", e)
 
     return "CASUAL"
 
 
-def _llm_classify_intent(message: str) -> str:
-    """Use Groq to classify intent for ambiguous messages."""
-    import groq as groq_lib
-    import os
-    from config import GROQ_MODEL
-
-    client_obj = groq_lib.Groq(api_key=os.getenv("GROQ_API_KEY", ""))
-    prompt = f"""Classify the following WhatsApp message into ONE of these intents:
-STUCK, LOW_MOOD, NEGATIVE_PUSH, COMPLETION_REPORT, PLAN_SUBMISSION, CASUAL
-
-Message: "{message}"
-
-Respond with ONLY the intent label, nothing else."""
-
-    response = client_obj.chat.completions.create(
+def _llm_classify(message: str) -> str:
+    """LLM fallback intent classifier."""
+    from groq import Groq
+    client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
+    prompt = (
+        f"Classify this WhatsApp message into ONE label.\n"
+        f"Labels: STUCK, LOW_MOOD, NEGATIVE_PUSH, COMPLETION_REPORT, PLAN_SUBMISSION, CASUAL\n"
+        f'Message: "{message}"\n'
+        f"Reply with ONLY the label."
+    )
+    resp = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=10,
         temperature=0.0,
     )
-    result = response.choices[0].message.content.strip().upper()
+    result = resp.choices[0].message.content.strip().upper()
     valid = {"STUCK", "LOW_MOOD", "NEGATIVE_PUSH", "COMPLETION_REPORT", "PLAN_SUBMISSION", "CASUAL"}
     return result if result in valid else "CASUAL"
 
 
+# ---------------------------------------------------------------------------
+# All handlers use the two-pass system
+# ---------------------------------------------------------------------------
+
 def handle_stuck(message: str) -> str:
-    """Handle 'I'm stuck' messages with CBT micro-step approach."""
+    """User is stuck — two-pass with context hint."""
     doc = gdocs.load_motivation_doc()
     history = memory.get_chat_history()
-    prompt = llm.get_stuck_response_prompt(doc, message)
-    # Inject history context into base prompt
-    prompt = _inject_history(prompt, history)
-    return llm.generate_response(prompt, trigger_type="stuck")
+    tasks = _get_tasks()
+    return llm.generate_two_pass(
+        user_message=message,
+        history=history,
+        motivation_doc=doc,
+        tasks=tasks,
+        trigger_type="stuck",
+        context_hint="user says they're stuck on something",
+    )
 
 
 def handle_low_mood(message: str) -> str:
-    """Handle low motivation messages with empathy-first + behavioral activation."""
+    """User doesn't feel like working — two-pass."""
     doc = gdocs.load_motivation_doc()
     history = memory.get_chat_history()
-    prompt = llm.get_low_mood_response_prompt(doc, message)
-    prompt = _inject_history(prompt, history)
-    return llm.generate_response(prompt, trigger_type="low_mood")
+    tasks = _get_tasks()
+    return llm.generate_two_pass(
+        user_message=message,
+        history=history,
+        motivation_doc=doc,
+        tasks=tasks,
+        trigger_type="low_mood",
+        context_hint="user doesn't feel like working — ask why before pushing",
+    )
 
 
 def handle_negative_push(message: str) -> str:
-    """Handle 'stop' / negative messages — acknowledge but NEVER comply."""
+    """User pushing back or asking to stop — two-pass, never comply."""
     doc = gdocs.load_motivation_doc()
     history = memory.get_chat_history()
-    prompt = llm.get_negative_push_response_prompt(doc, message)
-    prompt = _inject_history(prompt, history)
-    return llm.generate_response(prompt, trigger_type="negative_push")
+    tasks = _get_tasks()
+    return llm.generate_two_pass(
+        user_message=message,
+        history=history,
+        motivation_doc=doc,
+        tasks=tasks,
+        trigger_type="negative_push",
+        context_hint=(
+            "user is pushing back or asking to stop. "
+            "Do NOT comply or apologize. "
+            "Acknowledge briefly then redirect — like a friend who isn't playing along."
+        ),
+    )
 
 
 def handle_completion(message: str) -> str:
-    """Mark the current task complete and return acknowledgment + next step."""
+    """User completed a task — mark it, then respond + next task."""
     from agents import task_agent
     doc = gdocs.load_motivation_doc()
-    completed_task = task_agent.mark_most_recent_task_complete()
-    task_name = completed_task["task"] if completed_task else "that task"
-    prompt = llm.get_completion_response_prompt(doc, task_name)
-    response = llm.generate_response(prompt, trigger_type="completion")
+    history = memory.get_chat_history()
 
-    # Append next task ping if available
-    next_ping = task_agent.ping_next_task()
-    if next_ping:
-        response = f"{response}\n\n{next_ping}"
+    completed = task_agent.mark_most_recent_task_complete()
+    task_name = completed["task"] if completed else "that"
 
+    tasks_remaining = task_agent.get_pending_tasks()
+    context = f"user just finished: '{task_name}'."
+    if tasks_remaining:
+        next_task = tasks_remaining[0]["task"]
+        context += f" Next pending task is: '{next_task}'."
+    else:
+        context += " All tasks are done for today."
+
+    response = llm.generate_two_pass(
+        user_message=message,
+        history=history,
+        motivation_doc=doc,
+        tasks=tasks_remaining,
+        trigger_type="completion",
+        context_hint=context,
+    )
     return response
 
 
-def _inject_history(prompt: str, history: list) -> str:
-    """Replace history placeholder in prompt with actual recent messages."""
-    last_msgs = history[-3:] if history else []
-    history_text = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in last_msgs
-    ) or "No prior messages."
-    return prompt.replace("No prior messages.", history_text)
+def _get_tasks() -> list:
+    try:
+        from agents import task_agent
+        return task_agent.get_pending_tasks()
+    except Exception:
+        return []

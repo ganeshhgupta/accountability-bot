@@ -1,6 +1,6 @@
-# Agent: Ghost | Role: Escalate messaging frequency when user goes silent
+# Agent: Ghost | Role: Escalate when user goes silent — short, direct, human
 
-"""Ghost agent — tracks silence and escalates outbound messaging frequency."""
+"""Ghost agent — tracks silence and escalates. Keeps messages terse."""
 
 import logging
 from datetime import datetime, timezone
@@ -14,29 +14,19 @@ from config import GHOST_THRESHOLDS
 logger = logging.getLogger(__name__)
 
 
-def _minutes_since_last_response() -> int | None:
-    """Return minutes since user last responded, or None if no record."""
+def _minutes_silent() -> int | None:
     last = memory.get_last_response_time()
     if last is None:
         return None
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    delta = datetime.now(timezone.utc) - last
-    return int(delta.total_seconds() // 60)
+    return int((datetime.now(timezone.utc) - last).total_seconds() // 60)
 
 
 def check_ghost_status() -> int:
-    """Return current ghost level (0-3) based on silence duration.
-
-    Level 0: responded within 45 min (normal)
-    Level 1: 45-90 min silent
-    Level 2: 90-120 min silent
-    Level 3: 120+ min silent
-    """
-    minutes = _minutes_since_last_response()
+    minutes = _minutes_silent()
     if minutes is None:
         return 0
-
     if minutes >= GHOST_THRESHOLDS[3]:
         return 3
     if minutes >= GHOST_THRESHOLDS[2]:
@@ -47,57 +37,47 @@ def check_ghost_status() -> int:
 
 
 def escalate_if_needed() -> str | None:
-    """Determine whether to send a ghost escalation message.
-
-    Called by the scheduler every 15 minutes during active hours.
-    Returns the message string to send, or None if escalation is not needed.
-    Respects schedule window via is_active_now().
-    """
+    """Called every 15 min by scheduler. Returns message to send or None."""
     if not is_active_now():
         return None
 
-    minutes = _minutes_since_last_response()
+    minutes = _minutes_silent()
     if minutes is None:
         return None
 
-    current_level = check_ghost_status()
-    stored_level = memory.get_ghost_level()
-
+    current = check_ghost_status()
+    stored = memory.get_ghost_level()
     doc = gdocs.load_motivation_doc()
 
-    if current_level == 0:
-        # User responded recently — reset
-        if stored_level != 0:
+    if current == 0:
+        if stored != 0:
             memory.set_ghost_level(0)
         return None
 
-    if current_level == 1 and stored_level < 1:
+    if current == 1 and stored < 1:
         memory.set_ghost_level(1)
         prompt = llm.get_ghost_level1_prompt(doc, minutes)
-        msg = llm.generate_response(prompt, trigger_type="ghost_level1")
-        logger.info("Ghost level 1 triggered (%d min silent)", minutes)
+        msg = llm.generate_response(prompt, trigger_type="ghost_1")
+        logger.info("Ghost L1 | %d min silent", minutes)
         return msg
 
-    if current_level == 2 and stored_level < 2:
+    if current == 2 and stored < 2:
         memory.set_ghost_level(2)
         prompt = llm.get_ghost_level2_prompt(doc, minutes)
-        msg = llm.generate_response(prompt, trigger_type="ghost_level2")
-        logger.info("Ghost level 2 triggered (%d min silent)", minutes)
+        msg = llm.generate_response(prompt, trigger_type="ghost_2")
+        logger.info("Ghost L2 | %d min silent", minutes)
         return msg
 
-    if current_level == 3:
-        # Level 3: fire every 15-min scheduler tick, don't gate on stored_level
+    if current == 3:
         memory.set_ghost_level(3)
         prompt = llm.get_ghost_level3_prompt(doc, minutes)
-        msg = llm.generate_response(prompt, trigger_type="ghost_level3")
-        logger.info("Ghost level 3 triggered (%d min silent)", minutes)
+        msg = llm.generate_response(prompt, trigger_type="ghost_3")
+        logger.info("Ghost L3 | %d min silent", minutes)
         return msg
 
     return None
 
 
 def reset_ghost_level() -> None:
-    """Reset ghost level when user sends any message."""
     memory.set_ghost_level(0)
     memory.set_last_response_time()
-    logger.info("Ghost level reset — user responded")
