@@ -97,6 +97,19 @@ Add a startup health check that pings Groq with a 1-token request and logs the r
 
 <!-- Claude: add your fixes here as you work -->
 
+## Fix #2 - 2026-03-22
+**Error**: Bot responses were mechanical, scripted, and shallow — sounding like a therapy chatbot ("This resistance is telling us that we're touching on something real")
+**Root Cause**: Single-pass prompts described CBT techniques to the LLM instead of giving it a character and voice. No observation step before responding. No quality gate. LLM pattern-matched "pushback = resistance script" without reading the actual moment.
+**Fix Applied**: Full refactor of llm.py + all agent prompts:
+  1. Two-pass system: Pass 1 (silent observer JSON) → Pass 2 (response from observation)
+  2. 23 banned therapy phrases with auto-regenerate on detection
+  3. Technique rotation tracking in Redis — never repeats same approach twice in a row
+  4. Length enforcement: max 2 sentences, compress via separate Groq call if exceeded
+  5. All scheduled prompts rewritten with human voice (short, direct, Hinglish allowed)
+  6. Ghost messages: single impactful line, "bhai" style
+**Files Modified**: llm.py, agents/mood_agent.py, agents/orchestrator.py, agents/ghost_agent.py
+**Prevention**: Never tell the LLM to "use CBT techniques" — give it a character and let it respond naturally from that character. Always have an observation step before generating. Always enforce a quality gate for banned patterns and length.
+
 ## Fix #1 - 2026-03-22
 **Error**: Google Docs integration removed from spec before first deploy
 **Root Cause**: User does not need Google Docs; adds unnecessary complexity and credentials
