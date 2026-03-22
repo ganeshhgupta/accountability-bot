@@ -7,6 +7,7 @@ import logging
 import os
 
 import pytz
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import gdocs
@@ -77,6 +78,17 @@ def _job(trigger_type: str) -> None:
     _send_whatsapp(message, trigger_type)
 
 
+def _keep_alive() -> None:
+    """Ping own /health endpoint every 10 min to prevent Render free-tier spin-down."""
+    url = os.getenv("RENDER_URL", "")
+    if not url:
+        return
+    try:
+        requests.get(f"{url}/health", timeout=5)
+    except Exception:
+        pass
+
+
 def _ghost_check_job() -> None:
     """Ghost escalation — runs every 15 min during active hours."""
     if not memory.acquire_scheduler_lock("ghost_check", ttl_seconds=55):
@@ -124,6 +136,15 @@ def create_scheduler() -> BackgroundScheduler:
         trigger="interval",
         minutes=15,
         id="ghost_check",
+        replace_existing=True,
+    )
+
+    # Keep-alive ping every 10 minutes to prevent Render free-tier spin-down
+    scheduler.add_job(
+        _keep_alive,
+        trigger="interval",
+        minutes=10,
+        id="keep_alive",
         replace_existing=True,
     )
 
