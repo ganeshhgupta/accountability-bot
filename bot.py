@@ -201,6 +201,19 @@ if __name__ == "__main__":
     scheduler.start()
     logger.info("Scheduler started")
 
+    # Send startup notification
+    try:
+        from twilio.rest import Client
+        _c = Client(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+        _c.messages.create(
+            body="Bot is live. Kar le bhai.",
+            from_=os.getenv("TWILIO_WHATSAPP_FROM"),
+            to=os.getenv("MY_WHATSAPP_NUMBER"),
+        )
+        logger.info("Startup message sent")
+    except Exception as _e:
+        logger.warning("Startup message failed: %s", _e)
+
     port = int(os.getenv("PORT", 5000))
     # FIXES.md Gotcha #2: Never use debug=True
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
