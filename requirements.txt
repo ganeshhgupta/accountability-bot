@@ -1,0 +1,8 @@
+flask
+twilio
+groq
+apscheduler
+upstash-redis
+python-dotenv
+pytz
+requests
