@@ -225,6 +225,132 @@ def set_day_state(state: dict) -> None:
 # Scheduler lock (FIXES.md Gotcha #7 — prevents duplicate sends on multi-dyno)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Question streak tracking
+# ---------------------------------------------------------------------------
+
+def get_question_streak() -> int:
+    """How many consecutive bot questions have gone unanswered / bounced."""
+    try:
+        r = _get_redis()
+        val = r.get("question_streak")
+        return int(val) if val is not None else 0
+    except Exception as e:
+        logger.warning("Redis get_question_streak failed: %s", e)
+        return int(_fallback.get("question_streak", 0))
+
+
+def increment_question_streak() -> None:
+    try:
+        current = get_question_streak()
+        r = _get_redis()
+        r.set("question_streak", current + 1)
+        _fallback["question_streak"] = current + 1
+    except Exception as e:
+        logger.warning("Redis increment_question_streak failed: %s", e)
+
+
+def reset_question_streak() -> None:
+    try:
+        r = _get_redis()
+        r.set("question_streak", 0)
+        _fallback["question_streak"] = 0
+    except Exception as e:
+        logger.warning("Redis reset_question_streak failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Technique rotation tracking
+# ---------------------------------------------------------------------------
+
+def get_last_two_techniques() -> list:
+    try:
+        r = _get_redis()
+        raw = r.get("last_techniques")
+        return json.loads(raw) if raw else []
+    except Exception as e:
+        logger.warning("Redis get_last_two_techniques failed: %s", e)
+        raw = _fallback.get("last_techniques")
+        return json.loads(raw) if raw else []
+
+
+def save_last_technique(technique: str) -> None:
+    try:
+        techniques = get_last_two_techniques()
+        techniques.append(technique)
+        techniques = techniques[-2:]
+        serialised = json.dumps(techniques)
+        r = _get_redis()
+        r.set("last_techniques", serialised)
+        _fallback["last_techniques"] = serialised
+    except Exception as e:
+        logger.warning("Redis save_last_technique failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Living psychological model
+# ---------------------------------------------------------------------------
+
+_DEFAULT_PSYCH_MODEL = {
+    "current_stability": 5,
+    "dominant_pattern_this_week": "none",
+    "what_is_landing": [],
+    "what_is_bouncing": [],
+    "recent_wins_to_reference": [],
+    "current_avoidance_target": "job applications",
+    "anusha_mention_frequency": "stable",
+    "work_momentum": "flat",
+    "best_time_to_push": "morning",
+    "current_register_preference": "mixed",
+    "last_updated": None,
+}
+
+
+def get_psych_model() -> dict:
+    try:
+        r = _get_redis()
+        raw = r.get("psych_model")
+        if raw:
+            return json.loads(raw)
+    except Exception as e:
+        logger.warning("Redis get_psych_model failed: %s", e)
+        raw = _fallback.get("psych_model")
+        if raw:
+            return json.loads(raw)
+    return dict(_DEFAULT_PSYCH_MODEL)
+
+
+def save_psych_model(model: dict) -> None:
+    try:
+        serialised = json.dumps(model)
+        r = _get_redis()
+        r.set("psych_model", serialised)
+        _fallback["psych_model"] = serialised
+    except Exception as e:
+        logger.warning("Redis save_psych_model failed: %s", e)
+        _fallback["psych_model"] = json.dumps(model)
+
+
+# ---------------------------------------------------------------------------
+# User message time (for silence calculation in pipeline)
+# ---------------------------------------------------------------------------
+
+def save_last_user_message_time() -> None:
+    """Record when the user last sent a message (separate from bot response time)."""
+    now_str = datetime.now(timezone.utc).isoformat()
+    try:
+        r = _get_redis()
+        r.set("last_user_message_time", now_str)
+        _fallback["last_user_message_time"] = now_str
+    except Exception as e:
+        logger.warning("Redis save_last_user_message_time failed: %s", e)
+        _fallback["last_user_message_time"] = now_str
+
+
+# ---------------------------------------------------------------------------
+# Scheduler lock
+# ---------------------------------------------------------------------------
+
 def acquire_scheduler_lock(job_name: str, ttl_seconds: int = 60) -> bool:
     """Attempt to acquire a Redis lock for a scheduler job.
 
